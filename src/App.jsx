@@ -169,28 +169,34 @@ export default function App() {
   const [loading, setLoading]           = useState(false);
   const [syncing, setSyncing]           = useState(false);
   const [syncMsg, setSyncMsg]           = useState("");
+  const [selectedPlayer, setSelectedPlayer]   = useState(null);
+  const [globalLockedRounds, setGlobalLockedRounds] = useState(new Set());
+  const [adminRound, setAdminRound]           = useState(null); // null = auto
 
   const isConfigured = SUPABASE_URL !== "YOUR_SUPABASE_URL";
 
   // ── Build bracket from actuals ─────────────────────────────────────
-  const bracket = buildBracket(INITIAL_BRACKET, actuals);
+  const bracket    = buildBracket(INITIAL_BRACKET, actuals, false);
+  const bracketTBD = buildBracket(INITIAL_BRACKET, actuals, true);
 
-  function buildBracket(init, results) {
+  function buildBracket(init, results, includeTBD = false) {
     const east = [...init.east];
     const west = [...init.west];
     for (let r = 2; r <= 4; r++) {
       const ep = east.filter(s => s.round === r - 1);
       const wp = west.filter(s => s.round === r - 1);
       if (r <= 3) {
-        pairWinners(ep, results).forEach((p, i) =>
+        pairWinners(ep, results, includeTBD).forEach((p, i) =>
           east.push({ ...p, id: `e${r}${i}`, conf: "East", round: r }));
-        pairWinners(wp, results).forEach((p, i) =>
+        pairWinners(wp, results, includeTBD).forEach((p, i) =>
           west.push({ ...p, id: `w${r}${i}`, conf: "West", round: r }));
       } else {
         const ew = getWinner(east.find(s => s.round === 3), results);
         const ww = getWinner(west.find(s => s.round === 3), results);
         if (ew && ww)
           east.push({ id: "finals", seed1: null, team1: ew, seed2: null, team2: ww, conf: "Finals", round: 4 });
+        else if (includeTBD)
+          east.push({ id: "finals", seed1: null, team1: ew || "TBD", seed2: null, team2: ww || "TBD", conf: "Finals", round: 4, tbd: true });
       }
     }
     return { east, west };
@@ -200,19 +206,24 @@ export default function App() {
     return results[series?.id]?.winner || null;
   }
 
-  function pairWinners(prev, results) {
-    const ws = prev.map(s => getWinner(s, results)).filter(Boolean);
+  function pairWinners(prev, results, includeTBD = false) {
     const pairs = [];
-    for (let i = 0; i < ws.length; i += 2)
-      if (ws[i] && ws[i + 1])
-        pairs.push({ seed1: null, team1: ws[i], seed2: null, team2: ws[i + 1] });
+    for (let i = 0; i < prev.length; i += 2) {
+      const w1 = getWinner(prev[i], results);
+      const w2 = getWinner(prev[i + 1], results);
+      if (w1 && w2)
+        pairs.push({ seed1: null, team1: w1, seed2: null, team2: w2 });
+      else if (includeTBD)
+        pairs.push({ seed1: null, team1: w1 || "TBD", seed2: null, team2: w2 || "TBD", tbd: true });
+    }
     return pairs;
   }
 
-  function getAllSeries() {
+  function getAllSeries(useTBD = false) {
+    const b = useTBD ? bracketTBD : bracket;
     const all = [];
     for (let r = 1; r <= 4; r++)
-      all.push(...bracket.east.filter(s => s.round === r), ...bracket.west.filter(s => s.round === r));
+      all.push(...b.east.filter(s => s.round === r), ...b.west.filter(s => s.round === r));
     return all;
   }
 
@@ -224,8 +235,20 @@ export default function App() {
       const [pRaw, aRaw] = await Promise.all([DB.getAllPicks(), DB.getAllActuals()]);
       setAllPlayers(pRaw.map(r => ({ name: r.player_name, picks: r.picks || {} })));
       const am = {};
-      aRaw.forEach(r => { am[r.id] = { winner: r.winner, games: r.games }; });
+      const cfg = {};
+      aRaw.forEach(r => {
+        if (r.id.startsWith("_")) cfg[r.id] = r.winner;
+        else am[r.id] = { winner: r.winner, games: r.games };
+      });
       setActuals(am);
+      // Parse admin round override
+      const ar = cfg["_active_round"];
+      setAdminRound(ar && ar !== "auto" ? parseInt(ar) : null);
+      // Parse globally locked rounds
+      const glr = new Set();
+      for (let r = 1; r <= 4; r++)
+        if (cfg[`_lock_r${r}`] === "locked") glr.add(r);
+      setGlobalLockedRounds(glr);
     } catch (e) { console.error("DB fetch error:", e); }
     setLoading(false);
   }, [isConfigured]);
@@ -311,8 +334,32 @@ export default function App() {
     setTimeout(() => setSyncMsg(""), 4000);
   }
 
+  // ── Admin round control ────────────────────────────────────────────
+  async function adminSetRound(r) {
+    const val = r === null ? "auto" : String(r);
+    setAdminRound(r);
+    if (isConfigured) {
+      try { await DB.saveActual("_active_round", val, null); } catch (e) { console.error(e); }
+    }
+  }
+
+  async function adminLockRound(r) {
+    setGlobalLockedRounds(prev => new Set([...prev, r]));
+    if (isConfigured) {
+      try { await DB.saveActual(`_lock_r${r}`, "locked", null); } catch (e) { console.error(e); }
+    }
+  }
+
+  async function adminUnlockRound(r) {
+    setGlobalLockedRounds(prev => { const s = new Set(prev); s.delete(r); return s; });
+    if (isConfigured) {
+      try { await DB.saveActual(`_lock_r${r}`, "unlocked", null); } catch (e) { console.error(e); }
+    }
+  }
+
   // ── Active round (derived from results) ───────────────────────────
   function getActiveRound() {
+    if (adminRound !== null) return adminRound;
     const all = getAllSeries();
     for (let r = 1; r <= 4; r++) {
       const rs = all.filter(s => s.round === r);
@@ -323,19 +370,24 @@ export default function App() {
   }
   const currentRound = getActiveRound();
   const lockedRounds = new Set(picks._lockedRounds || []);
-  const isRoundLocked = lockedRounds.has(currentRound);
+  const isRoundLocked = globalLockedRounds.has(currentRound) || lockedRounds.has(currentRound);
 
   // ── Leaderboard ────────────────────────────────────────────────────
   function scorePlayer(p) {
     return getAllSeries().reduce((sum, s) => sum + calcScore(p[s.id], actuals[s.id]), 0);
   }
   const leaderboard = [...allPlayers]
-    .map(p => ({ name: p.name, score: scorePlayer(p.picks) }))
+    .map(p => ({
+      name: p.name,
+      score: scorePlayer(p.picks),
+      pickCount: Object.keys(p.picks || {}).filter(k => k !== "_lockedRounds").length,
+    }))
     .sort((a, b) => b.score - a.score);
 
-  const visibleSeries = getAllSeries().filter(s => s.round === currentRound);
-  const pickedCount = visibleSeries.filter(s => picks[s.id]).length;
-  const totalSeries = visibleSeries.length;
+  const visibleSeries  = getAllSeries(true).filter(s => s.round === currentRound);
+  const pickableSeries = visibleSeries.filter(s => !s.tbd);
+  const pickedCount    = pickableSeries.filter(s => picks[s.id]).length;
+  const totalSeries    = pickableSeries.length;
 
   // ══════════════════════════════════════════════════════════════════
   return (
@@ -354,10 +406,10 @@ export default function App() {
           </div>
           <nav style={S.nav}>
             {playerName && (
-              <button style={screen === "pick" ? S.navOn : S.navOff} onClick={() => setScreen("pick")}>Picks</button>
+              <button className="nav-btn" style={screen === "pick" ? S.navOn : S.navOff} onClick={() => setScreen("pick")}>Picks</button>
             )}
-            <button style={screen === "leaderboard" ? S.navOn : S.navOff} onClick={() => setScreen("leaderboard")}>Board</button>
-            <button style={screen === "admin" ? S.navOn : S.navOff} onClick={() => setScreen("admin")}>Results</button>
+            <button className="nav-btn" style={screen === "leaderboard" ? S.navOn : S.navOff} onClick={() => setScreen("leaderboard")}>Board</button>
+            <button className="nav-btn" style={screen === "admin" ? S.navOn : S.navOff} onClick={() => setScreen("admin")}>Results</button>
           </nav>
         </div>
       </header>
@@ -392,6 +444,14 @@ export default function App() {
 
             {/* Right — entry */}
             <div style={S.entryPanel} className="entry-panel">
+              {/* Mobile-only brand header */}
+              <div style={S.mobileBrand} className="mobile-brand">
+                <span style={S.mobileBrandBall}>🏀</span>
+                <div>
+                  <div style={S.mobileBrandTitle}>SHORT WHITE GUYS</div>
+                  <div style={S.mobileBrandSub}>TALKING HOOPS</div>
+                </div>
+              </div>
               <div style={S.entryTag}>PICK'EM CHALLENGE</div>
               <h1 style={S.entryTitle}>Who you<br/>got?</h1>
               <p style={S.entrySub}>
@@ -443,7 +503,15 @@ export default function App() {
               <div style={S.roundHeaderSub}>Round {currentRound} of 4</div>
             </div>
             {isRoundLocked && (
-              <div style={S.lockedChip}>PICKS LOCKED</div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                <div style={S.lockedChip}>PICKS LOCKED</div>
+                {playerName && (
+                  <button style={S.viewPicksLink}
+                    onClick={() => { setSelectedPlayer(playerName); setScreen("player"); }}>
+                    View my picks →
+                  </button>
+                )}
+              </div>
             )}
           </div>
 
@@ -456,7 +524,7 @@ export default function App() {
               <SeriesCard key={s.id} series={s}
                 pick={picks[s.id]} actual={actuals[s.id]}
                 locked={isRoundLocked}
-                onChange={p => !isRoundLocked && setPicks(prev => ({ ...prev, [s.id]: p }))}
+                onChange={p => !isRoundLocked && !s.tbd && setPicks(prev => ({ ...prev, [s.id]: p }))}
               />
             ))}
           </div>
@@ -512,21 +580,24 @@ export default function App() {
           ) : (
             <div style={S.lbList}>
               {leaderboard.map((p, i) => (
-                <div key={p.name} className="lb-row" style={{
-                  ...S.lbRow,
-                  ...(i === 0 ? { borderColor: `${C.gold}66`, background: `${C.gold}0a` } : {}),
-                  ...(p.name === playerName ? { outline: `2px solid ${C.gold}44`, outlineOffset: 2 } : {}),
-                }}>
+                <div key={p.name} className="lb-row" onClick={() => { setSelectedPlayer(p.name); setScreen("player"); }}
+                  style={{
+                    ...S.lbRow, cursor: "pointer",
+                    ...(i === 0 ? { borderColor: `${C.gold}66`, background: `${C.gold}0a` } : {}),
+                    ...(p.name === playerName ? { outline: `2px solid ${C.gold}44`, outlineOffset: 2 } : {}),
+                  }}>
                   <div style={S.lbRank}>
                     {i === 0 ? "🏆" : i === 1 ? "🥈" : i === 2 ? "🥉" : <span style={{ color: C.muted }}>{i + 1}</span>}
                   </div>
                   <div style={S.lbName}>
                     {p.name}
                     {p.name === playerName && <span style={S.meChip}>YOU</span>}
+                    <div style={S.lbPickCount}>{p.pickCount} pick{p.pickCount !== 1 ? "s" : ""}</div>
                   </div>
                   <div style={S.lbScore} className="lb-score">
                     {p.score}<span style={S.lbPts}> pts</span>
                   </div>
+                  <div style={{ color: C.muted, fontSize: 14, marginLeft: 4 }}>›</div>
                 </div>
               ))}
             </div>
@@ -543,6 +614,70 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ════════════════════════════════════════════════════════════
+          PLAYER DETAIL
+      ════════════════════════════════════════════════════════════ */}
+      {screen === "player" && (() => {
+        const player = allPlayers.find(p => p.name === selectedPlayer);
+        const playerPicks = player?.picks || {};
+        const totalScore = getAllSeries().reduce((sum, s) => sum + calcScore(playerPicks[s.id], actuals[s.id]), 0);
+        return (
+          <div style={S.page}>
+            <div style={S.pageTop}>
+              <div>
+                <h2 style={S.pageTitle}>{selectedPlayer}</h2>
+                <div style={S.pageSub}>{totalScore} pts total</div>
+              </div>
+              <button style={S.refreshBtn} onClick={() => setScreen("leaderboard")}>← Board</button>
+            </div>
+
+            {[1, 2, 3, 4].map(round => {
+              const rs = getAllSeries().filter(s => s.round === round);
+              if (!rs.length) return null;
+              const anyPick = rs.some(s => playerPicks[s.id]);
+              if (!anyPick) return null;
+              return (
+                <div key={round} style={{ marginBottom: 28 }}>
+                  <div style={S.roundLabel}>{ROUND_NAMES[round - 1]}</div>
+                  {rs.map(s => {
+                    const pick = playerPicks[s.id];
+                    const actual = actuals[s.id];
+                    const pts = calcScore(pick, actual);
+                    const correct = actual && pick && pick.winner === actual.winner;
+                    const wrong = actual && pick && pick.winner !== actual.winner;
+                    if (!pick) return null;
+                    return (
+                      <div key={s.id} style={S.pickRow}>
+                        <div style={S.pickRowMatchup}>{s.team1} vs {s.team2}</div>
+                        <div style={S.pickRowPick}>
+                          <span style={{
+                            ...S.pickRowWinner,
+                            color: correct ? "#4ade80" : wrong ? "#f87171" : C.text,
+                          }}>
+                            {pick.winner}
+                          </span>
+                          <span style={S.pickRowGames}>in {pick.games}</span>
+                        </div>
+                        {actual?.winner ? (
+                          <div style={{
+                            ...S.pickRowPts,
+                            color: pts > 0 ? C.gold : C.muted,
+                          }}>
+                            {pts > 0 ? `+${pts}` : pts} pts
+                          </div>
+                        ) : (
+                          <div style={{ ...S.pickRowPts, color: C.muted }}>—</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {/* ════════════════════════════════════════════════════════════
           ADMIN / RESULTS
@@ -573,28 +708,73 @@ export default function App() {
             </div>
           ) : (
             <>
-              <div style={S.syncRow}>
-                <button style={S.syncBtn} onClick={syncESPN} disabled={syncing}>
-                  {syncing ? "Syncing…" : "⚡ Sync from ESPN"}
-                </button>
-                {syncMsg && <span style={S.syncMsg}>{syncMsg}</span>}
+              {/* ── Round Control ──────────────────────────────── */}
+              <div style={S.adminSection}>
+                <div style={S.adminSectionHead}>ROUND CONTROL</div>
+                <p style={{ ...S.lockNote, textAlign: "left", marginBottom: 14 }}>
+                  Open a round to let players make picks before results are finalized.
+                  Lock a round to prevent any further changes.
+                </p>
+                {[1, 2, 3, 4].map(r => {
+                  const isActive   = currentRound === r;
+                  const isOverride = adminRound === r;
+                  const isLocked   = globalLockedRounds.has(r);
+                  return (
+                    <div key={r} style={S.rcRow}>
+                      <div style={S.rcInfo}>
+                        <span style={S.rcName}>{ROUND_NAMES[r - 1]}</span>
+                        <div style={{ display: "flex", gap: 6, marginTop: 5 }}>
+                          {isActive  && <span style={S.rcChipActive}>ACTIVE</span>}
+                          {isOverride && <span style={S.rcChipOverride}>OVERRIDE</span>}
+                          {isLocked  && <span style={S.rcChipLocked}>LOCKED</span>}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        {isOverride
+                          ? <button style={S.rcBtnClear} onClick={() => adminSetRound(null)}>Clear Override</button>
+                          : <button style={S.rcBtnOpen}  onClick={() => adminSetRound(r)}>Set Active</button>
+                        }
+                        {isLocked
+                          ? <button style={S.rcBtnUnlock} onClick={() => adminUnlockRound(r)}>Unlock</button>
+                          : <button style={S.rcBtnLock}   onClick={() => adminLockRound(r)}>Lock</button>
+                        }
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-              <p style={{ ...S.lockNote, textAlign: "left", marginBottom: 20 }}>
-                Or enter results manually below — overrides ESPN data.
-              </p>
-              {[1, 2, 3, 4].map(round => {
-                const rs = getAllSeries().filter(s => s.round === round);
-                if (!rs.length) return null;
-                return (
-                  <div key={round}>
-                    <div style={S.roundLabel}>{ROUND_NAMES[round - 1]}</div>
-                    {rs.map(s => (
-                      <AdminRow key={s.id} series={s} actual={actuals[s.id]}
-                        onChange={(w, g) => saveActual(s.id, w, g)} />
-                    ))}
-                  </div>
-                );
-              })}
+
+              {/* ── ESPN Sync ──────────────────────────────────── */}
+              <div style={S.adminSection}>
+                <div style={S.adminSectionHead}>ESPN AUTO-SYNC</div>
+                <div style={S.syncRow}>
+                  <button style={S.syncBtn} onClick={syncESPN} disabled={syncing}>
+                    {syncing ? "Syncing…" : "⚡ Sync from ESPN"}
+                  </button>
+                  {syncMsg && <span style={S.syncMsg}>{syncMsg}</span>}
+                </div>
+              </div>
+
+              {/* ── Manual Results ─────────────────────────────── */}
+              <div style={S.adminSection}>
+                <div style={S.adminSectionHead}>MANUAL RESULTS</div>
+                <p style={{ ...S.lockNote, textAlign: "left", marginBottom: 12 }}>
+                  Enter results manually — overrides ESPN data.
+                </p>
+                {[1, 2, 3, 4].map(round => {
+                  const rs = getAllSeries().filter(s => s.round === round);
+                  if (!rs.length) return null;
+                  return (
+                    <div key={round}>
+                      <div style={S.roundLabel}>{ROUND_NAMES[round - 1]}</div>
+                      {rs.map(s => (
+                        <AdminRow key={s.id} series={s} actual={actuals[s.id]}
+                          onChange={(w, g) => saveActual(s.id, w, g)} />
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
             </>
           )}
         </div>
@@ -605,13 +785,25 @@ export default function App() {
 
 // ── Series Card ───────────────────────────────────────────────────────────
 function SeriesCard({ series, pick, actual, locked, onChange }) {
-  const { team1, team2, seed1, seed2 } = series;
+  const { team1, team2, seed1, seed2, tbd } = series;
   const winner = pick?.winner;
   const games  = pick?.games;
   const c1 = TEAM_COLORS[team1] || "#888";
   const c2 = TEAM_COLORS[team2] || "#888";
   const scored  = actual && pick ? calcScore(pick, actual) : null;
   const correct = actual && pick && pick.winner === actual.winner;
+  const effectiveLocked = locked || tbd;
+
+  if (tbd) return (
+    <div style={{ ...S.card, opacity: 0.5 }}>
+      <div style={{ textAlign: "center", padding: "18px 0", color: "#6b7a8f", fontSize: 13, letterSpacing: "0.08em" }}>
+        <div style={{ fontSize: 18, marginBottom: 6 }}>⏳</div>
+        {team1 === "TBD" && team2 === "TBD"
+          ? "Matchup TBD — awaiting round results"
+          : `${team1} vs ${team2} — matchup TBD`}
+      </div>
+    </div>
+  );
 
   return (
     <div style={{ ...S.card, ...(winner ? S.cardActive : {}), ...(locked ? { opacity: 0.75 } : {}) }}>
@@ -736,7 +928,8 @@ const C = {
   card:    "#111720",
   border:  "#1a2132",
   text:    "#d8dfed",
-  muted:   "#4e5a6e",
+  dim:     "#8a97a8",   // readable secondary text
+  muted:   "#4e5a6e",   // de-emphasised chrome only
   gold:    "#f5a623",
   green:   "#22c55e",
   red:     "#ef4444",
@@ -766,13 +959,13 @@ const S = {
     fontSize: 12, fontWeight: 900, letterSpacing: "0.04em", flexShrink: 0,
   },
   logoLine1: { fontSize: 13, fontWeight: 800, letterSpacing: "0.08em", color: C.text },
-  logoLine2: { fontSize: 9, color: C.muted, letterSpacing: "0.12em", marginTop: 1 },
+  logoLine2: { fontSize: 9, color: C.dim, letterSpacing: "0.12em", marginTop: 1 },
   nav: { display: "flex", gap: 4 },
-  navOff: { background: "none", border: "none", color: C.muted, padding: "6px 10px", cursor: "pointer", fontSize: 12, letterSpacing: "0.07em", borderRadius: 4, fontFamily: "inherit", fontWeight: 600 },
+  navOff: { background: "none", border: "none", color: C.dim, padding: "8px 14px", cursor: "pointer", fontSize: 13, letterSpacing: "0.07em", borderRadius: 6, fontFamily: "inherit", fontWeight: 700 },
   navOn: {
     background: `${C.gold}18`, border: `1px solid ${C.gold}55`,
-    color: C.gold, padding: "5px 10px", cursor: "pointer",
-    fontSize: 12, letterSpacing: "0.07em", borderRadius: 4,
+    color: C.gold, padding: "8px 14px", cursor: "pointer",
+    fontSize: 13, letterSpacing: "0.07em", borderRadius: 6,
     fontFamily: "inherit", fontWeight: 700,
   },
 
@@ -828,8 +1021,16 @@ const S = {
     lineHeight: 0.9, letterSpacing: "-0.01em",
     margin: "0 0 16px", textTransform: "uppercase", color: C.text,
   },
+  mobileBrand: {
+    display: "none", alignItems: "center", gap: 12,
+    marginBottom: 28, paddingBottom: 24, borderBottom: `1px solid ${C.border}`,
+  },
+  mobileBrandBall: { fontSize: 36 },
+  mobileBrandTitle: { fontSize: 22, fontWeight: 900, color: C.gold, letterSpacing: "0.06em", lineHeight: 1 },
+  mobileBrandSub: { fontSize: 14, fontWeight: 900, color: C.text, letterSpacing: "0.16em", marginTop: 2 },
+
   entrySub: {
-    color: C.muted, fontSize: 13, lineHeight: 1.8, marginBottom: 28,
+    color: C.dim, fontSize: 14, lineHeight: 1.8, marginBottom: 28,
     fontFamily: "'Barlow', sans-serif", fontWeight: 400,
   },
   input: {
@@ -856,16 +1057,21 @@ const S = {
   pickTopBar: {
     display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20,
   },
-  pickGreet: { fontSize: 13, color: C.muted, fontFamily: "'Barlow', sans-serif" },
+  pickGreet: { fontSize: 14, color: C.dim, fontFamily: "'Barlow', sans-serif" },
   pickName: { fontSize: 15, fontWeight: 900, color: C.gold, letterSpacing: "0.06em", textTransform: "uppercase" },
-  backBtn: { background: "none", border: "none", color: C.muted, fontSize: 12, cursor: "pointer", letterSpacing: "0.05em", fontFamily: "inherit" },
+  backBtn: { background: "none", border: "none", color: C.dim, fontSize: 13, cursor: "pointer", letterSpacing: "0.05em", fontFamily: "inherit" },
+  viewPicksLink: {
+    background: "none", border: "none", color: C.gold, fontSize: 12,
+    cursor: "pointer", fontFamily: "inherit", letterSpacing: "0.06em",
+    padding: 0, fontWeight: 700,
+  },
 
   roundHeader: {
     display: "flex", alignItems: "center", justifyContent: "space-between",
     marginBottom: 20, paddingBottom: 16, borderBottom: `1px solid ${C.border}`,
   },
   roundHeaderLabel: { fontSize: 22, fontWeight: 900, letterSpacing: "0.06em", textTransform: "uppercase" },
-  roundHeaderSub: { fontSize: 10, color: C.muted, letterSpacing: "0.14em", marginTop: 3 },
+  roundHeaderSub: { fontSize: 11, color: C.dim, letterSpacing: "0.14em", marginTop: 3 },
   lockedChip: {
     fontSize: 9, fontWeight: 800, letterSpacing: "0.14em",
     background: `${C.border}`, border: `1px solid ${C.muted}44`,
@@ -922,7 +1128,7 @@ const S = {
     backdropFilter: "blur(10px)", zIndex: 40,
   },
   saveBarName: { fontSize: 14, fontWeight: 900, color: C.gold, letterSpacing: "0.08em", textTransform: "uppercase" },
-  saveBarSub: { fontSize: 10, color: C.muted, letterSpacing: "0.04em", marginTop: 2 },
+  saveBarSub: { fontSize: 11, color: C.dim, letterSpacing: "0.04em", marginTop: 2 },
   saveBtn: {
     background: C.gold, border: "none", borderRadius: 6,
     padding: "10px 28px", color: C.bg, fontSize: 13, fontWeight: 900,
@@ -949,7 +1155,8 @@ const S = {
     borderRadius: 8, padding: "14px 18px", gap: 14,
   },
   lbRank: { width: 28, textAlign: "center", fontSize: 15, fontWeight: 900, flexShrink: 0 },
-  lbName: { flex: 1, fontSize: 17, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase" },
+  lbName: { flex: 1, fontSize: 17, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", lineHeight: 1.2 },
+  lbPickCount: { fontSize: 10, color: C.dim, fontWeight: 400, textTransform: "none", letterSpacing: "0.04em", marginTop: 3, fontFamily: "'Barlow', sans-serif" },
   meChip: {
     fontSize: 8, background: `${C.gold}33`, color: C.gold,
     border: `1px solid ${C.gold}44`, borderRadius: 2,
@@ -964,10 +1171,22 @@ const S = {
     borderRadius: 8, padding: "18px 20px",
     fontFamily: "'Barlow', sans-serif",
   },
-  scoringHead: { fontSize: 9, color: C.muted, letterSpacing: "0.18em", marginBottom: 14, fontFamily: "inherit" },
+  scoringHead: { fontSize: 9, color: C.dim, letterSpacing: "0.18em", marginBottom: 14, fontFamily: "inherit" },
   scoringLines: { display: "flex", flexDirection: "column", gap: 8 },
-  scoreLine: { display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 600 },
-  scoreEx: { fontSize: 11, color: C.muted, marginTop: 12, fontStyle: "italic" },
+  scoreLine: { display: "flex", justifyContent: "space-between", fontSize: 14, fontWeight: 600 },
+  scoreEx: { fontSize: 12, color: C.dim, marginTop: 12, fontStyle: "italic" },
+
+  // Player detail
+  pickRow: {
+    display: "flex", alignItems: "center", gap: 12,
+    background: C.card, border: `1px solid ${C.border}`,
+    borderRadius: 8, padding: "12px 16px", marginBottom: 6,
+  },
+  pickRowMatchup: { fontSize: 12, color: C.dim, flex: 1, fontFamily: "'Barlow', sans-serif" },
+  pickRowPick: { display: "flex", alignItems: "baseline", gap: 6 },
+  pickRowWinner: { fontSize: 15, fontWeight: 900, letterSpacing: "0.04em", textTransform: "uppercase" },
+  pickRowGames: { fontSize: 12, color: C.dim, fontFamily: "'Barlow', sans-serif" },
+  pickRowPts: { fontSize: 13, fontWeight: 800, minWidth: 42, textAlign: "right" },
 
   // Admin
   roundLabel: { fontSize: 9, color: C.muted, letterSpacing: "0.16em", textTransform: "uppercase", margin: "20px 0 8px" },
@@ -984,7 +1203,33 @@ const S = {
     fontFamily: "inherit", cursor: "pointer",
   },
 
-  syncRow: { display: "flex", alignItems: "center", gap: 14, marginBottom: 20 },
+  // Admin sections
+  adminSection: {
+    background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
+    padding: "18px 20px", marginBottom: 16,
+  },
+  adminSectionHead: {
+    fontSize: 9, color: C.gold, letterSpacing: "0.2em", marginBottom: 14,
+    fontWeight: 800,
+  },
+
+  // Round control rows
+  rcRow: {
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    padding: "10px 0", borderBottom: `1px solid ${C.border}`,
+    flexWrap: "wrap", gap: 8,
+  },
+  rcInfo: { display: "flex", flexDirection: "column" },
+  rcName: { fontSize: 14, fontWeight: 800, letterSpacing: "0.04em" },
+  rcChipActive:   { fontSize: 8, fontWeight: 800, letterSpacing: "0.12em", color: C.gold,    background: `${C.gold}18`,    border: `1px solid ${C.gold}44`,    borderRadius: 3, padding: "2px 7px" },
+  rcChipOverride: { fontSize: 8, fontWeight: 800, letterSpacing: "0.12em", color: "#60a5fa", background: "#60a5fa18",     border: `1px solid #60a5fa44`,     borderRadius: 3, padding: "2px 7px" },
+  rcChipLocked:   { fontSize: 8, fontWeight: 800, letterSpacing: "0.12em", color: "#f87171", background: "#ef444418",     border: `1px solid #ef444444`,     borderRadius: 3, padding: "2px 7px" },
+  rcBtnOpen:   { background: `${C.gold}18`,    border: `1px solid ${C.gold}55`,    color: C.gold,    borderRadius: 5, padding: "6px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: "0.06em" },
+  rcBtnClear:  { background: "#60a5fa18",     border: `1px solid #60a5fa55`,     color: "#60a5fa", borderRadius: 5, padding: "6px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: "0.06em" },
+  rcBtnLock:   { background: "#ef444418",     border: `1px solid #ef444455`,     color: "#f87171", borderRadius: 5, padding: "6px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: "0.06em" },
+  rcBtnUnlock: { background: `${C.border}`,   border: `1px solid ${C.muted}44`,  color: C.muted,   borderRadius: 5, padding: "6px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: "0.06em" },
+
+  syncRow: { display: "flex", alignItems: "center", gap: 14, marginBottom: 4 },
   syncBtn: {
     background: `${C.gold}18`, border: `1px solid ${C.gold}55`, borderRadius: 6,
     color: C.gold, padding: "10px 18px", fontSize: 13, fontWeight: 700,
@@ -994,8 +1239,8 @@ const S = {
 
   lockBox: { textAlign: "center", maxWidth: 340, margin: "0 auto", paddingTop: 20 },
   lockIcon: { fontSize: 32, marginBottom: 16 },
-  lockNote: { color: C.muted, fontSize: 13, marginBottom: 20, lineHeight: 1.7, fontFamily: "'Barlow', sans-serif" },
-  lockHint: { fontSize: 11, color: C.muted, marginTop: 14, fontFamily: "'Barlow', sans-serif" },
+  lockNote: { color: C.dim, fontSize: 14, marginBottom: 20, lineHeight: 1.7, fontFamily: "'Barlow', sans-serif" },
+  lockHint: { fontSize: 12, color: C.dim, marginTop: 14, fontFamily: "'Barlow', sans-serif" },
 };
 
 const CSS = `
@@ -1008,15 +1253,19 @@ const CSS = `
   ::-webkit-scrollbar-thumb { background: #1a2132; border-radius: 2px; }
 
   @media (max-width: 640px) {
-    /* Home: stack panels, hide brand panel */
+    /* Home: stack panels, hide brand panel, show mobile brand */
     .home-grid { grid-template-columns: 1fr !important; }
     .brand-panel { display: none !important; }
-    .entry-panel { padding: 32px 24px !important; }
+    .entry-panel { padding: 28px 20px !important; }
+    .mobile-brand { display: flex !important; }
 
-    /* Header: shrink logo text */
-    .logo-line1 { font-size: 11px !important; }
+    /* Header: hide long text line, just show chip + subtitle */
+    .logo-line1 { display: none !important; }
 
-    /* Picks: more breathing room on cards */
+    /* Nav: bigger tap targets */
+    .nav-btn { padding: 10px 16px !important; font-size: 14px !important; min-height: 44px; }
+
+    /* Picks */
     .pick-wrap { padding: 16px 12px 100px !important; }
     .team-btn { padding: 12px 4px !important; }
     .team-name { font-size: 12px !important; }
