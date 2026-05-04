@@ -153,6 +153,9 @@ function calcScore(pick, actual) {
   return Math.max(0, 4 - Math.abs(pick.games - actual.games));
 }
 
+const toTitleCase = s =>
+  s.trim().split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+
 // ══════════════════════════════════════════════════════════════════════════
 // APP
 // ══════════════════════════════════════════════════════════════════════════
@@ -467,18 +470,41 @@ export default function App() {
                 onChange={e => setNameInput(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === "Enter" && nameInput.trim()) {
-                    setPlayerName(nameInput.trim()); setScreen("pick");
+                    const n = toTitleCase(nameInput);
+                    setNameInput(n); setPlayerName(n); setScreen("pick");
                   }
                 }}
               />
               <button
                 style={{ ...S.cta, opacity: nameInput.trim() ? 1 : 0.4 }}
                 disabled={!nameInput.trim()}
-                onClick={() => { setPlayerName(nameInput.trim()); setScreen("pick"); }}
+                onClick={() => {
+                  const n = toTitleCase(nameInput);
+                  setNameInput(n); setPlayerName(n); setScreen("pick");
+                }}
               >
                 LOCK IN →
               </button>
               <button style={S.ghost} onClick={() => setScreen("leaderboard")}>View Leaderboard</button>
+
+              {/* Returning player chips */}
+              {allPlayers.length > 0 && (
+                <div style={S.returningWrap}>
+                  <div style={S.returningLabel}>Returning player?</div>
+                  <div style={S.chipScroll}>
+                    {allPlayers.map(p => (
+                      <button key={p.name} style={S.nameChip}
+                        onClick={() => {
+                          setNameInput(p.name);
+                          setPlayerName(p.name);
+                          setScreen("pick");
+                        }}>
+                        {p.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {loading && <p style={S.loadNote}>Loading group picks…</p>}
             </div>
           </div>
@@ -1053,6 +1079,25 @@ const S = {
     cursor: "pointer", fontFamily: "inherit",
   },
   loadNote: { fontSize: 11, color: C.muted, marginTop: 10, letterSpacing: "0.05em" },
+
+  returningWrap: {
+    marginTop: 20, paddingTop: 20, borderTop: `1px solid ${C.border}`,
+  },
+  returningLabel: {
+    fontSize: 9, color: C.muted, letterSpacing: "0.16em", textTransform: "uppercase",
+    marginBottom: 10,
+  },
+  chipScroll: {
+    display: "flex", flexWrap: "wrap", gap: 8,
+  },
+  nameChip: {
+    background: C.card, border: `1px solid ${C.border}`,
+    borderRadius: 20, padding: "7px 14px",
+    color: C.text, fontSize: 13, fontWeight: 700,
+    cursor: "pointer", fontFamily: "inherit",
+    letterSpacing: "0.04em", whiteSpace: "nowrap",
+    transition: "border-color 0.15s, color 0.15s",
+  },
 
   // Picks
   pickWrap: { maxWidth: 960, margin: "0 auto", padding: "20px 16px 100px" },
