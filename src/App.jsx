@@ -1089,8 +1089,8 @@ const S = {
     marginTop: 0,
   },
   returningLabel: {
-    fontSize: 9, color: C.muted, letterSpacing: "0.16em", textTransform: "uppercase",
-    marginBottom: 10,
+    fontSize: 12, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase",
+    marginBottom: 10, fontWeight: 700,
   },
   chipScroll: {
     display: "flex", flexWrap: "wrap", gap: 8,
