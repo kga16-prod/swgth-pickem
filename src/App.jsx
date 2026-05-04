@@ -208,9 +208,11 @@ export default function App() {
 
   function pairWinners(prev, results, includeTBD = false) {
     const pairs = [];
-    for (let i = 0; i < prev.length; i += 2) {
+    // NBA bracket: 1/8 plays 4/5, 2/7 plays 3/6 in second round; sequential in conf finals
+    const indices = prev.length === 4 ? [[0, 3], [1, 2]] : [[0, 1]];
+    for (const [i, j] of indices) {
       const w1 = getWinner(prev[i], results);
-      const w2 = getWinner(prev[i + 1], results);
+      const w2 = getWinner(prev[j], results);
       if (w1 && w2)
         pairs.push({ seed1: null, team1: w1, seed2: null, team2: w2 });
       else if (includeTBD)
