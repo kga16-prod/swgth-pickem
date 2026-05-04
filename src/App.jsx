@@ -260,6 +260,9 @@ export default function App() {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
+  // Refresh data whenever player enters the picks screen (catches admin round changes)
+  useEffect(() => { if (screen === "pick") fetchAll(); }, [screen]);
+
   // Pre-fill picks for returning player
   useEffect(() => {
     if (!playerName) return;
@@ -276,7 +279,6 @@ export default function App() {
     try {
       if (isConfigured) {
         await DB.savePicks(playerName, lockedPicks);
-        await fetchAll();
       } else {
         setAllPlayers(prev => {
           const i = prev.findIndex(p => p.name.toLowerCase() === playerName.toLowerCase());
@@ -287,6 +289,8 @@ export default function App() {
       setPicks(lockedPicks);
       setSaveState("saved");
       setTimeout(() => setSaveState("idle"), 2500);
+      // Refresh in background — isolated so a network hiccup doesn't affect save state
+      fetchAll().catch(console.error);
     } catch (err) {
       console.error(err);
       setSaveState("error");
