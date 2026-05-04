@@ -463,34 +463,10 @@ export default function App() {
                 Pick every series winner + game length.<br/>
                 <span style={{ color: C.gold }}>+4 pts</span> right winner &nbsp;·&nbsp; <span style={{ color: "#f87171" }}>−1 pt</span> per game off.
               </p>
-              <input
-                style={S.input}
-                placeholder="Your name"
-                value={nameInput}
-                onChange={e => setNameInput(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === "Enter" && nameInput.trim()) {
-                    const n = toTitleCase(nameInput);
-                    setNameInput(n); setPlayerName(n); setScreen("pick");
-                  }
-                }}
-              />
-              <button
-                style={{ ...S.cta, opacity: nameInput.trim() ? 1 : 0.4 }}
-                disabled={!nameInput.trim()}
-                onClick={() => {
-                  const n = toTitleCase(nameInput);
-                  setNameInput(n); setPlayerName(n); setScreen("pick");
-                }}
-              >
-                LOCK IN →
-              </button>
-              <button style={S.ghost} onClick={() => setScreen("leaderboard")}>View Leaderboard</button>
-
               {/* Returning player chips */}
               {allPlayers.length > 0 && (
                 <div style={S.returningWrap}>
-                  <div style={S.returningLabel}>Returning player?</div>
+                  <div style={S.returningLabel}>Who are you?</div>
                   <div style={S.chipScroll}>
                     {allPlayers.map(p => (
                       <button key={p.name} style={S.nameChip}
@@ -505,6 +481,35 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              {/* Manual name entry fallback */}
+              <div style={{ ...S.returningWrap, marginTop: allPlayers.length > 0 ? 16 : 0 }}>
+                {allPlayers.length > 0 && <div style={S.returningLabel}>Not listed?</div>}
+                <input
+                  style={S.input}
+                  placeholder="Enter your name"
+                  value={nameInput}
+                  onChange={e => setNameInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === "Enter" && nameInput.trim()) {
+                      const n = toTitleCase(nameInput);
+                      setNameInput(n); setPlayerName(n); setScreen("pick");
+                    }
+                  }}
+                />
+                <button
+                  style={{ ...S.cta, opacity: nameInput.trim() ? 1 : 0.4 }}
+                  disabled={!nameInput.trim()}
+                  onClick={() => {
+                    const n = toTitleCase(nameInput);
+                    setNameInput(n); setPlayerName(n); setScreen("pick");
+                  }}
+                >
+                  LOCK IN →
+                </button>
+              </div>
+
+              <button style={S.ghost} onClick={() => setScreen("leaderboard")}>View Leaderboard</button>
               {loading && <p style={S.loadNote}>Loading group picks…</p>}
             </div>
           </div>
@@ -1081,7 +1086,7 @@ const S = {
   loadNote: { fontSize: 11, color: C.muted, marginTop: 10, letterSpacing: "0.05em" },
 
   returningWrap: {
-    marginTop: 20, paddingTop: 20, borderTop: `1px solid ${C.border}`,
+    marginTop: 0,
   },
   returningLabel: {
     fontSize: 9, color: C.muted, letterSpacing: "0.16em", textTransform: "uppercase",
