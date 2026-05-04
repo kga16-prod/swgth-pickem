@@ -104,7 +104,7 @@ const DB = {
     sbFetch("swgth_picks?select=player_name,picks&order=updated_at.desc"),
 
   savePicks: (playerName, picks) =>
-    sbFetch("swgth_picks", {
+    sbFetch("swgth_picks?on_conflict=player_name", {
       method: "POST",
       headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
       body: JSON.stringify({ player_name: playerName, picks, updated_at: new Date().toISOString() }),
