@@ -273,20 +273,16 @@ export default function App() {
   // ── Save picks ─────────────────────────────────────────────────────
   async function submitPicks() {
     setSaveState("saving");
-    const locked = [...(picks._lockedRounds || [])];
-    if (!locked.includes(currentRound)) locked.push(currentRound);
-    const lockedPicks = { ...picks, _lockedRounds: locked };
     try {
       if (isConfigured) {
-        await DB.savePicks(playerName, lockedPicks);
+        await DB.savePicks(playerName, picks);
       } else {
         setAllPlayers(prev => {
           const i = prev.findIndex(p => p.name.toLowerCase() === playerName.toLowerCase());
-          const e = { name: playerName, picks: lockedPicks };
+          const e = { name: playerName, picks };
           return i >= 0 ? prev.map((p, j) => (j === i ? e : p)) : [...prev, e];
         });
       }
-      setPicks(lockedPicks);
       setSaveState("saved");
       setTimeout(() => setSaveState("idle"), 2500);
       // Refresh in background — isolated so a network hiccup doesn't affect save state
@@ -378,8 +374,7 @@ export default function App() {
     return 4;
   }
   const currentRound = getActiveRound();
-  const lockedRounds = new Set(picks._lockedRounds || []);
-  const isRoundLocked = globalLockedRounds.has(currentRound) || lockedRounds.has(currentRound);
+  const isRoundLocked = globalLockedRounds.has(currentRound);
 
   // ── Leaderboard ────────────────────────────────────────────────────
   function scorePlayer(p) {
